@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: ikun-manga
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: HOST
+        value: "0.0.0.0"

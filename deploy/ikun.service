@@ -1,0 +1,19 @@
+[Unit]
+Description=i kun manga
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/ikun
+Environment=HOST=127.0.0.1
+Environment=PORT=8788
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/ikun/server.py
+Restart=on-failure
+RestartSec=3
+MemoryMax=700M
+
+[Install]
+WantedBy=multi-user.target

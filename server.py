@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""包子漫画本地站。
+
+原站壳是 Astro，真资源在：
+  搜索/首页  baozimh.org HTML
+  目录      v2.apikk.top/api/manga/get
+  章节图    v2.apikk.top/api/v2/chapter/getinfo  （加密 blob，本地 decoder 解开）
+  图源      c-nd2/c-nd3.6wm.top
+
+目录和解码结果进内存/磁盘缓存，二次打开不再打上游。
+图片走代理流，不落盘。点下载才打 zip。
+
+  python3 server.py
+  http://127.0.0.1:8788
+"""
+from __future__ import annotations
+
+import html as html_lib
+import io
+import json
+import os
+import re
+import ssl
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from decoder import decode_images
+
+ROOT = Path(__file__).resolve().parent
+STATIC = ROOT / "static"
+DATA = ROOT / "data"
+DATA.mkdir(exist_ok=True)
+CTX = ssl._create_unverified_context()
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
+PORT = int(os.environ.get("PORT", "8788"))
+HOST = os.environ.get("HOST") or ("0.0.0.0" if "PORT" in os.environ else "127.0.0.1")
+SITE = "https://baozimh.org"
+API = "https://v2.apikk.top"
+CDN = {
+    2: "https://c-nd2-1.6wm.top",
+    "default": "https://c-nd3-1.6wm.top",
+}
+TTL_HOME = 600
+TTL_SEARCH = 600
+TTL_MANGA = 300
+TTL_CHAPTER = 86400 * 7
+
+_LOCK = threading.Lock()
+_MEM: dict[str, tuple[float, object]] = {}
+
+CARD_RE = re.compile(
+    r'<a href="(/manga/([^"/\s]+))"[^>]*>'
+    r"[\s\S]{0,1500}?<img[^>]+src=\"(https://[^\"]+)\"[\s\S]{0,500}?"
+    r"<h3[^>]*>([^<]+)</h3>",
+    re.I,
+)
+
+
+def http_get(url: str, headers: dict | None = None, timeout: int = 25) -> bytes:
+    h = {
+        "User-Agent": UA,
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": SITE + "/",
+        "Origin": SITE,
+    }
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(url, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
+        return resp.read()
+
+
+def json_get(url: str) -> dict:
+    raw = http_get(url, headers={"Accept": "application/json"})
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
+def _disk_path(kind: str, key: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", key)[:160]
+    folder = DATA / kind
+    folder.mkdir(exist_ok=True)
+    return folder / (safe + ".json")
+
+
+def cache_get(kind: str, key: str, ttl: int):
+    now = time.time()
+    ck = f"{kind}:{key}"
+    with _LOCK:
+        hit = _MEM.get(ck)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    path = _disk_path(kind, key)
+    if path.is_file():
+        try:
+            obj = json.loads(path.read_text("utf-8"))
+            ts = float(obj.get("_ts") or 0)
+            if now - ts < ttl:
+                data = obj.get("data")
+                with _LOCK:
+                    _MEM[ck] = (ts, data)
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def cache_set(kind: str, key: str, data):
+    now = time.time()
+    ck = f"{kind}:{key}"
+    with _LOCK:
+        _MEM[ck] = (now, data)
+        if len(_MEM) > 800:
+            oldest = sorted(_MEM.items(), key=lambda kv: kv[1][0])[:200]
+            for k, _ in oldest:
+                _MEM.pop(k, None)
+    try:
+        _disk_path(kind, key).write_text(
+            json.dumps({"_ts": now, "data": data}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def parse_cards(html: str, limit: int = 60) -> list[dict]:
+    items = []
+    seen = set()
+    for m in CARD_RE.finditer(html):
+        slug = m.group(2)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        items.append(
+            {
+                "slug": slug,
+                "title": html_lib.unescape(m.group(4)).strip(),
+                "cover": m.group(3),
+                "href": m.group(1),
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def parse_home_sections(html: str) -> dict[str, list[dict]]:
+    marks = [
+        ("recent", "近期更新"),
+        ("hot_update", "熱門更新"),
+        ("rank", "人氣排行"),
+        ("new", "最新上架"),
+    ]
+    found = []
+    for key, label in marks:
+        i = html.find(label)
+        if i >= 0:
+            found.append((i, key, label))
+    found.sort()
+    out: dict[str, list[dict]] = {k: [] for k, _ in marks}
+    for idx, (pos, key, _label) in enumerate(found):
+        end = found[idx + 1][0] if idx + 1 < len(found) else min(len(html), pos + 12000)
+        out[key] = parse_cards(html[pos:end], 24)
+    return out
+
+
+def fetch_list_page(path: str) -> list[dict]:
+    html = http_get(SITE + path, headers={"Accept": "text/html"}).decode("utf-8", "replace")
+    return parse_cards(html, 36)
+
+
+def home_payload() -> dict:
+    cached = cache_get("home", "index", TTL_HOME)
+    if cached:
+        return cached
+    html = http_get(SITE + "/", headers={"Accept": "text/html"}).decode("utf-8", "replace")
+    sections = parse_home_sections(html)
+    extras = {}
+    need = []
+    if not sections.get("rank"):
+        need.append(("hots", "/hots", "rank"))
+    if not sections.get("hot_update"):
+        need.append(("dayup", "/dayup", "hot_update"))
+    if not sections.get("new"):
+        need.append(("newss", "/newss", "new"))
+    for list_key, path, sec_key in need:
+        try:
+            extras[list_key] = fetch_list_page(path)
+            sections[sec_key] = extras[list_key]
+        except Exception:
+            extras[list_key] = []
+    payload = {"code": 0, "sections": sections, "lists": extras}
+    cache_set("home", "index", payload)
+    return payload
+
+
+def search_site(keyword: str, page: int = 1) -> dict:
+    key = f"{keyword}_{page}"
+    cached = cache_get("search", key, TTL_SEARCH)
+    if cached:
+        return cached
+    qs = urllib.parse.urlencode({"q": keyword, "page": page})
+    html = http_get(f"{SITE}/s?{qs}", headers={"Accept": "text/html"}).decode("utf-8", "replace")
+    total = 0
+    m = re.search(r"總數:\s*<span[^>]*>(\d+)</span>", html)
+    if m:
+        total = int(m.group(1))
+    payload = {
+        "code": 0,
+        "keyword": keyword,
+        "page": page,
+        "total": total,
+        "list": parse_cards(html, 60),
+    }
+    cache_set("search", key, payload)
+    return payload
+
+
+def manga_mid(slug: str) -> dict:
+    cached = cache_get("slug", slug, TTL_CHAPTER)
+    if cached and cached.get("mid"):
+        return cached
+    html = http_get(f"{SITE}/manga/{slug}", headers={"Accept": "text/html"}).decode(
+        "utf-8", "replace"
+    )
+    mid = ""
+    m = re.search(r'data-mid="(\d+)"', html)
+    if m:
+        mid = m.group(1)
+    title = ""
+    tm = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S)
+    if tm:
+        title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+    cover = ""
+    cm = re.search(
+        r"https://c-nc-1\.6wm\.top/manga/" + re.escape(slug) + r"/[^\"\s>]+\.webp", html
+    )
+    if cm:
+        cover = cm.group(0)
+    first_cs = ""
+    fm = re.search(r'data-firstid="(\d+)"', html)
+    if fm:
+        first_cs = fm.group(1)
+    if not mid:
+        raise RuntimeError("no mid on manga page")
+    meta = {"mid": mid, "slug": slug, "title": title, "cover": cover, "first_cs": first_cs}
+    cache_set("slug", slug, meta)
+    return meta
+
+
+def manga_full(mid: str) -> dict:
+    cached = cache_get("manga", mid, TTL_MANGA)
+    if cached:
+        return cached
+    j = json_get(f"{API}/api/manga/get?mid={urllib.parse.quote(mid)}&mode=all")
+    if not j.get("status"):
+        raise RuntimeError(j.get("msg") or "manga get failed")
+    d = j.get("data") or {}
+    chapters = []
+    for ch in d.get("chapters") or []:
+        attr = ch.get("attributes") or {}
+        chapters.append(
+            {
+                "id": str(ch.get("id") or ""),
+                "title": attr.get("title") or "",
+                "slug": attr.get("slug") or "",
+                "order": attr.get("order"),
+                "updated": attr.get("updatedAt") or "",
+            }
+        )
+    chapters.reverse()
+    payload = {
+        "code": 0,
+        "id": str(d.get("id") or mid),
+        "title": d.get("title") or "",
+        "slug": d.get("slug") or "",
+        "cover": d.get("cover") or "",
+        "desc": d.get("desc") or "",
+        "status": d.get("status"),
+        "chapters": chapters,
+    }
+    if payload["slug"]:
+        cache_set(
+            "slug",
+            payload["slug"],
+            {
+                "mid": payload["id"],
+                "slug": payload["slug"],
+                "title": payload["title"],
+                "cover": payload["cover"],
+                "first_cs": chapters[-1]["id"] if chapters else "",
+            },
+        )
+    cache_set("manga", mid, payload)
+    return payload
+
+
+def cdn_host(line: int | None) -> str:
+    if line == 2:
+        return CDN[2]
+    return str(CDN["default"])
+
+
+def chapter_info(mid: str, cid: str) -> dict:
+    key = f"{mid}_{cid}"
+    cached = cache_get("chapter", key, TTL_CHAPTER)
+    if cached:
+        return cached
+    j = json_get(
+        f"{API}/api/v2/chapter/getinfo?m={urllib.parse.quote(mid)}&c={urllib.parse.quote(cid)}"
+    )
+    if not j.get("status"):
+        raise RuntimeError("chapter getinfo failed")
+    info = (j.get("data") or {}).get("info") or {}
+    blob = info.get("images") or {}
+    line = int(blob.get("line") or 1)
+    images = decode_images(blob.get("images") or "")
+    host = cdn_host(line)
+    pages = []
+    for item in images:
+        path = item.get("url") or ""
+        if not path.startswith("/"):
+            path = "/" + path
+        pages.append({"order": item.get("order"), "path": path, "url": host + path})
+    payload = {
+        "code": 0,
+        "mid": str(info.get("mid") or mid),
+        "cid": str(info.get("id") or cid),
+        "title": info.get("title") or "",
+        "manga": info.get("mangatitle") or "",
+        "slug": info.get("slug") or "",
+        "line": line,
+        "prevslug": info.get("prevslug") or "",
+        "nextslug": info.get("nextslug") or "",
+        "prevtitle": info.get("prevtitle") or "",
+        "nexttitle": info.get("nexttitle") or "",
+        "pre": str(info.get("pre") or ""),
+        "next": str(info.get("next") or ""),
+        "pages": pages,
+    }
+    cache_set("chapter", key, payload)
+    return payload
+
+
+def safe_name(text: str) -> str:
+    base = re.sub(r'[<>:"/\\|?*]', "_", (text or "").strip()) or "file"
+    return " ".join(base.split())[:80]
+
+
+def content_disposition(filename: str) -> str:
+    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace("?", "_")
+    starred = urllib.parse.quote(filename)
+    return "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (ascii_name, starred)
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", extra.get("Cache-Control") if extra and extra.get("Cache-Control") else "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "close")
+        if extra:
+            for k, v in extra.items():
+                if k == "Cache-Control":
+                    continue
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, obj, code=200):
+        raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        extra = {"Cache-Control": "no-store"}
+        if obj.get("code") == 0 and any(k in obj for k in ("pages", "chapters", "sections", "list")):
+            extra["Cache-Control"] = "private, max-age=30"
+        self._send(code, raw, "application/json; charset=utf-8", extra)
+
+    def do_OPTIONS(self):
+        self._send(204, b"", "text/plain")
+
+    def do_HEAD(self):
+        self._route(head_only=True)
+
+    def do_GET(self):
+        self._route(head_only=False)
+
+    def _img(self, path: str, line: int, head_only: bool):
+        if (
+            ".." in path
+            or not path.startswith("/")
+            or not re.match(r"^/[a-z0-9][a-z0-9_./-]*\.(webp|jpg|jpeg|png)$", path, re.I)
+        ):
+            return self._send(400, b"bad path", "text/plain")
+        url = cdn_host(line) + path
+        rng = None if head_only else self.headers.get("Range")
+        hdrs = {
+            "User-Agent": UA,
+            "Accept": "image/webp,image/*,*/*;q=0.8",
+            "Referer": SITE + "/",
+        }
+        if rng:
+            hdrs["Range"] = rng
+        req = urllib.request.Request(url, headers=hdrs)
+        try:
+            resp = urllib.request.urlopen(req, timeout=40, context=CTX)
+        except urllib.error.HTTPError as e:
+            body = e.read()
+            return self._send(e.code, body, e.headers.get("Content-Type") or "text/plain")
+        ctype = resp.headers.get("Content-Type") or "image/webp"
+        cl = resp.headers.get("Content-Length")
+        cr = resp.headers.get("Content-Range") or ""
+        extra = {
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=86400",
+            "Connection": "close",
+        }
+        code = 206 if rng and cr else 200
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        if cl:
+            self.send_header("Content-Length", cl)
+        if cr:
+            self.send_header("Content-Range", cr)
+        for k, v in extra.items():
+            self.send_header(k, v)
+        self.end_headers()
+        if head_only:
+            resp.close()
+            return
+        try:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        finally:
+            resp.close()
+
+    def _zip(self, mid: str, cid: str):
+        info = chapter_info(mid, cid)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+            for i, page in enumerate(info["pages"], 1):
+                raw = http_get(
+                    page["url"],
+                    headers={"Accept": "image/webp,image/*,*/*;q=0.8"},
+                    timeout=40,
+                )
+                zf.writestr(f"{i:03d}.webp", raw)
+        data = buf.getvalue()
+        fname = safe_name(f"{info['manga']} - {info['title']}") + ".zip"
+        extra = {"Content-Disposition": content_disposition(fname)}
+        self._send(200, data, "application/zip", extra)
+
+    def _route(self, head_only: bool = False):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/health":
+            body = b"ok"
+            if head_only:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+            return self._send(200, body, "text/plain")
+
+        if path in ("/", "/index.html"):
+            html = (STATIC / "index.html").read_bytes()
+            if head_only:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+            return self._send(200, html, "text/html; charset=utf-8")
+
+        if path == "/api/home":
+            try:
+                return self._json(home_payload())
+            except Exception as e:
+                return self._json({"code": -1, "msg": str(e)}, 502)
+
+        if path == "/api/list":
+            kind = (qs.get("kind") or ["hots"])[0]
+            table = {"hots": "/hots", "dayup": "/dayup", "newss": "/newss", "manga": "/manga"}
+            if kind not in table:
+                return self._json({"code": -1, "msg": "bad kind"}, 400)
+            cached = cache_get("list", kind, TTL_HOME)
+            if cached:
+                return self._json(cached)
+            try:
+                payload = {"code": 0, "kind": kind, "list": fetch_list_page(table[kind])}
+                cache_set("list", kind, payload)
+                return self._json(payload)
+            except Exception as e:
+                return self._json({"code": -1, "msg": str(e)}, 502)
+
+        if path == "/api/search":
+            kw = (qs.get("q") or qs.get("keyword") or [""])[0].strip()
+            page = int((qs.get("page") or ["1"])[0] or 1)
+            if not kw:
+                return self._json({"code": -1, "msg": "keyword required"}, 400)
+            try:
+                return self._json(search_site(kw, page))
+            except Exception as e:
+                return self._json({"code": -1, "msg": str(e)}, 502)
+
+        if path == "/api/manga":
+            slug = (qs.get("slug") or [""])[0].strip()
+            if not slug:
+                return self._json({"code": -1, "msg": "slug required"}, 400)
+            try:
+                meta = manga_mid(slug)
+                full = manga_full(meta["mid"])
+                if not full.get("cover"):
+                    full["cover"] = meta.get("cover") or ""
+                if not full.get("title"):
+                    full["title"] = meta.get("title") or slug
+                return self._json(full)
+            except Exception as e:
+                return self._json({"code": -1, "msg": str(e)}, 502)
+
+        if path == "/api/chapter":
+            mid = (qs.get("m") or qs.get("mid") or [""])[0].strip()
+            cid = (qs.get("c") or qs.get("cid") or [""])[0].strip()
+            if not mid or not cid:
+                return self._json({"code": -1, "msg": "m and c required"}, 400)
+            try:
+                return self._json(chapter_info(mid, cid))
+            except Exception as e:
+                return self._json({"code": -1, "msg": str(e)}, 502)
+
+        if path == "/img":
+            img_path = (qs.get("path") or [""])[0]
+            line = int((qs.get("line") or ["2"])[0] or 2)
+            if not img_path:
+                return self._send(400, b"path required", "text/plain")
+            try:
+                return self._img(img_path, line, head_only)
+            except Exception as e:
+                return self._send(502, str(e).encode(), "text/plain")
+
+        if path == "/download":
+            if head_only:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+            mid = (qs.get("m") or [""])[0].strip()
+            cid = (qs.get("c") or [""])[0].strip()
+            if not mid or not cid:
+                return self._send(400, b"m and c required", "text/plain")
+            try:
+                return self._zip(mid, cid)
+            except Exception as e:
+                return self._send(502, str(e).encode(), "text/plain")
+
+        if head_only:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
+        return self._send(404, b"not found", "text/plain")
+
+
+def main() -> int:
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"ikun manga  http://{HOST}:{PORT}", flush=True)
+    print("cache:", DATA, flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nbye")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

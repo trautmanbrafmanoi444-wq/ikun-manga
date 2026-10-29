@@ -1,0 +1,23 @@
+# baozimh.org
+
+Astro 静态壳 + Cloudflare。章节和图源不在 HTML 里。
+
+- 搜索：`GET https://baozimh.org/s?q=`
+- 漫画页：`/manga/{slug}`，`data-mid`
+- 目录：`GET https://v2.apikk.top/api/manga/get?mid={mid}&mode=all`
+- 章节：`GET https://v2.apikk.top/api/v2/chapter/getinfo?m={mid}&c={cid}`
+- `info.images.images` 是加密 blob，浏览器 `window.__cimg.r` 解码成 `{order,url}`
+- 线路 `line=2` → `https://c-nd2-1.6wm.top{url}`
+
+解码：`decoder.py` 对齐 `window.__cimg.r`。blob 解一次后写入 `data/chapter/`，二次打开不再打加密接口。
+
+本地站缓存：
+- `data/home/` 首页分区
+- `data/search/` 搜索
+- `data/slug/` slug→mid
+- `data/manga/` 章节目录
+- `data/chapter/` 已解码图链
+
+`python3 server.py` → http://127.0.0.1:8788
+上 Render：见 `deploy/RENDER.md`。VPS：`HOST=0.0.0.0 PORT=8788 python3 server.py`，步骤见 `deploy/README.md`。
+首页 / 人气 / 更新 / 上架 / 搜索 / 在线阅读。图片走流，点下载才打 zip。
