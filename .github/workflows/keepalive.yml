@@ -1,0 +1,24 @@
+# Render 免费实例闲置约 15 分钟会休眠。
+# 每 10 分钟打一次 /health，减少冷启动。
+# GitHub cron 可能晚点，不能 100% 保证不睡。
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: ping
+        run: |
+          set -e
+          URL="${KEEPALIVE_URL:-https://ikun-manga.onrender.com/health}"
+          curl -fsS --max-time 60 "$URL"
+          echo
+          echo "ok $(date -u +%FT%TZ)"
+        env:
+          KEEPALIVE_URL: https://ikun-manga.onrender.com/health

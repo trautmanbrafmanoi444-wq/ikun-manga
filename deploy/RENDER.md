@@ -43,6 +43,13 @@ git push -u origin main
 
 仓库里有 `render.yaml` 的话，也可以 **New + → Blueprint**，选仓库自动建服务。
 
+## 不休眠
+
+免费实例闲置约 15 分钟会睡，第一次打开要等 30～60 秒。
+
+- **真正常开**：Render 控制台点 **Upgrade now**，升到 Starter（约 $7/月）。这是官方方案。
+- **免费保活**：仓库里 `.github/workflows/keepalive.yml` 每 10 分钟访问 `/health`。GitHub cron 可能晚点，偶尔仍会睡。保活会把免费小时打满。
+
 ## 免费套餐注意
 
 - 15 分钟没人访问会休眠，第一次打开要等 30～60 秒
