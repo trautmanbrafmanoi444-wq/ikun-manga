@@ -38,6 +38,23 @@ CACHE = ROOT / "data" / "kmoe"
 SECRET = ROOT / ".secrets" / "kmoe.env"
 _LOGIN_LOCK = threading.Lock()
 _LOGGED = False
+_CFFI = None
+
+
+def _cffi():
+    global _CFFI
+    if _CFFI is False:
+        return None
+    if _CFFI is not None:
+        return _CFFI
+    try:
+        from curl_cffi import requests as cffi
+
+        _CFFI = cffi.Session(impersonate="chrome124")
+        return _CFFI
+    except Exception:
+        _CFFI = False
+        return None
 
 
 def _get(url: str, headers: dict | None = None, timeout: int = 25) -> bytes:
@@ -49,6 +66,11 @@ def _get(url: str, headers: dict | None = None, timeout: int = 25) -> bytes:
     }
     if headers:
         h.update(headers)
+    sess = _cffi()
+    if sess is not None:
+        r = sess.get(url, headers=h, timeout=timeout)
+        r.raise_for_status()
+        return r.content
     req = urllib.request.Request(url, headers=h)
     with _OPENER.open(req, timeout=timeout) as resp:
         return resp.read()
@@ -261,9 +283,14 @@ def _ensure_login() -> None:
             "X-KM-FROM": "KMOE/3.0.0(WEB) POST /login.php",
             "Content-Type": "multipart/form-data; boundary=" + boundary,
         }
-        req = urllib.request.Request(SITE + "/login_act.php", data=body, headers=h, method="POST")
-        with _OPENER.open(req, timeout=25) as resp:
-            raw = resp.read().decode("utf-8", "replace")
+        sess = _cffi()
+        if sess is not None:
+            r = sess.post(SITE + "/login_act.php", headers=h, data=body, timeout=25)
+            raw = r.content.decode("utf-8", "replace")
+        else:
+            req = urllib.request.Request(SITE + "/login_act.php", data=body, headers=h, method="POST")
+            with _OPENER.open(req, timeout=25) as resp:
+                raw = resp.read().decode("utf-8", "replace")
         if '"msgid":"m100"' not in raw and "m100" not in raw:
             raise RuntimeError("kmoe login failed: " + raw[:200])
         _LOGGED = True
@@ -336,12 +363,16 @@ def unpack_volume(bid: str, volid: str, fmt: int = 2) -> Path:
     if info.get("code") != 200 or not info.get("url"):
         raise RuntimeError(info.get("msg") or "no download url")
     href = info["url"]
-    req = urllib.request.Request(
-        href,
-        headers={"User-Agent": UA, "Referer": SITE + "/", "Accept": "*/*"},
-    )
-    with _OPENER.open(req, timeout=180) as resp:
-        data = resp.read()
+    dl_headers = {"User-Agent": UA, "Referer": SITE + "/", "Accept": "*/*"}
+    sess = _cffi()
+    if sess is not None:
+        r = sess.get(href, headers=dl_headers, timeout=180)
+        r.raise_for_status()
+        data = r.content
+    else:
+        req = urllib.request.Request(href, headers=dl_headers)
+        with _OPENER.open(req, timeout=180) as resp:
+            data = resp.read()
     images = _spine_images(data)
     if not images:
         raise RuntimeError("no comic pages in epub")
