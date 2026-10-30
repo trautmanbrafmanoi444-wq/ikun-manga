@@ -51,7 +51,7 @@ SITE = "https://baozimh.org"
 API = "https://v2.apikk.top"
 CDN = {
     2: "https://c-nd2-1.6wm.top",
-    "default": "https://c-nd3-1.6wm.top",
+    "default": "https://c-nd2-1.6wm.top",
 }
 TTL_HOME = 1800
 TTL_SEARCH = 1800
@@ -475,7 +475,14 @@ def chapter_info(mid: str, cid: str) -> dict:
         path = item.get("url") or ""
         if not path.startswith("/"):
             path = "/" + path
-        pages.append({"order": item.get("order"), "path": path, "url": host + path})
+        pages.append(
+            {
+                "order": item.get("order"),
+                "path": path,
+                "url": host + path,
+                "cf": host + path,
+            }
+        )
     payload = {
         "code": 0,
         "mid": str(info.get("mid") or mid),

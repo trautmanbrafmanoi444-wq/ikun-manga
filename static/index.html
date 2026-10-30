@@ -11,6 +11,13 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="format-detection" content="telephone=no" />
   <meta name="referrer" content="no-referrer" />
+  <link rel="preconnect" href="https://hip-cf-1.s3imgs.top" crossorigin />
+  <link rel="preconnect" href="https://cover.s3imgs.top" crossorigin />
+  <link rel="preconnect" href="https://c-nd2-1.6wm.top" crossorigin />
+  <link rel="preconnect" href="https://c-nd3-1.6wm.top" crossorigin />
+  <link rel="dns-prefetch" href="https://hip-cf-1.s3imgs.top" />
+  <link rel="dns-prefetch" href="https://cover.s3imgs.top" />
+  <link rel="dns-prefetch" href="https://c-nd2-1.6wm.top" />
   <title>i kun漫画</title>
   <style>
     :root {
@@ -360,6 +367,18 @@
     const SITE = "i kun漫画";
     const LISTS = { hots: "人气排行", dayup: "热门更新", newss: "最新上架" };
     const isPhone = () => matchMedia("(max-width: 680px)").matches;
+    const cfUrl = (u) => String(u || "")
+      .replace("://hip-tx-1.s3imgs.top", "://hip-cf-1.s3imgs.top")
+      .replace("://hip-tx-s1.s3imgs.top", "://hip-cf-s1.s3imgs.top");
+    const pageSrc = (p) => cfUrl(p.cf || p.url || "");
+    const preloadImgs = [];
+    function preloadImage(url) {
+      if (!url || preloadImgs.includes(url)) return;
+      preloadImgs.push(url);
+      const l = document.createElement("link");
+      l.rel = "preload"; l.as = "image"; l.href = url; l.referrerPolicy = "no-referrer";
+      document.head.appendChild(l);
+    }
 
     const svg = (d) => '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' + d + "</svg>";
     const ICON = {
@@ -748,14 +767,15 @@
       const width = isPhone() ? 99999 : store.get("bz.rw", 860);
       const imgs = pages.map((p, i) => {
         const proxy = "/img?line=" + enc(j.line) + "&path=" + enc(p.path) + (j.source === "hip" || (p.path || "").indexOf("/i/") === 0 ? "&src=hip" : "");
-        const direct = p.url || "";
-        const src = direct || proxy;
+        const direct = pageSrc(p) || p.url || "";
+        const eager = i < 4;
         return '<div class="pg" data-i="' + i + '"><span>' + (i + 1) + '</span>' +
-          '<img ' + (i < 2 ? 'fetchpriority="high" ' : 'loading="lazy" ') +
-          'decoding="async" referrerpolicy="no-referrer" draggable="false" src="' + esc(src) +
-          '" data-proxy="' + esc(proxy) + '" data-direct="' + esc(direct) +
+          '<img ' + (eager ? 'fetchpriority="high" src="' + esc(direct || proxy) + '" ' : 'data-src="' + esc(direct || proxy) + '" ') +
+          'decoding="async" referrerpolicy="no-referrer" draggable="false"' +
+          ' data-proxy="' + esc(proxy) + '" data-direct="' + esc(direct) +
           '" alt="第 ' + (i + 1) + ' 页"></div>';
       }).join("");
+      pages.slice(0, 4).forEach((p) => preloadImage(pageSrc(p) || p.url));
       const navBtn = (c, text, cls) => '<a class="btn sm' + (cls ? " " + cls : "") + '" ' +
         (c ? 'href="' + href(c) + '"' : 'aria-disabled="true" style="opacity:.4;pointer-events:none"') + ">" + text + "</a>";
 
@@ -840,8 +860,18 @@
           pg.appendChild(b);
         }
       }, true);
-      // 已经从缓存命中的图片可能不触发 load
-      $$("img", reader).forEach((img) => { if (img.complete && img.naturalWidth) settle(img); });
+      const io = new IntersectionObserver((ents) => {
+        ents.forEach((en) => {
+          if (!en.isIntersecting) return;
+          const img = en.target;
+          if (img.dataset.src && !img.getAttribute("src")) img.src = img.dataset.src;
+          io.unobserve(img);
+        });
+      }, { rootMargin: "2800px 0px 2800px 0px" });
+      $$("img", reader).forEach((img) => {
+        if (img.complete && img.naturalWidth) settle(img);
+        if (img.dataset.src) io.observe(img);
+      });
 
       $("#rw").onchange = (e) => { const v = Number(e.target.value); store.set("bz.rw", v); reader.style.setProperty("--rw", v + "px"); };
       $("#dl").onclick = (e) => downloadChapter(mid, cid, e.currentTarget, j.source);
@@ -859,8 +889,8 @@
 
       // 预取下一话图链 + 前几页图
       if (j.next) {
-        api(chapterUrl(mid, j.next)).then((n) => {
-          (n.pages || []).slice(0, 2).forEach((p) => { const im = new Image(); im.referrerPolicy = "no-referrer"; im.src = p.url || ("/img?line=" + enc(n.line) + "&path=" + enc(p.path) + (n.source === "hip" ? "&src=hip" : "")); });
+        api(chapterUrl(mid, j.next, j.source)).then((n) => {
+          (n.pages || []).slice(0, 4).forEach((p) => preloadImage(pageSrc(p) || p.url));
         }).catch(() => {});
       }
 
@@ -904,7 +934,10 @@
       pageCleanup = () => {
         removeEventListener("scroll", onScroll);
         removeEventListener("keydown", onKey);
+        io.disconnect();
         bar.style.width = "0";
+        document.querySelectorAll('link[rel="preload"][as="image"]').forEach((n) => n.remove());
+        preloadImgs.length = 0;
       };
     }
 

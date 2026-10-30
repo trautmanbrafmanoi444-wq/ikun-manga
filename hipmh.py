@@ -21,8 +21,8 @@ COVER = "https://cover.s3imgs.top"
 IMG_HOSTS = {
     1: "https://hip-cf-1.s3imgs.top",
     2: "https://hip-cf-1.s3imgs.top",
-    3: "https://hip-tx-1.s3imgs.top",
-    9: "https://hip-tx-s1.s3imgs.top",
+    3: "https://hip-cf-1.s3imgs.top",
+    9: "https://hip-cf-s1.s3imgs.top",
 }
 _META = {}
 _OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CTX))
@@ -246,7 +246,14 @@ def chapter(mid: str, hid: str) -> dict:
     for i, path in enumerate(paths, 1):
         if not path.startswith("/"):
             path = "/" + path
-        pages.append({"order": i, "path": path, "url": host + path})
+        pages.append(
+            {
+                "order": i,
+                "path": path,
+                "url": host + path,
+                "cf": "https://hip-cf-1.s3imgs.top" + path,
+            }
+        )
     return {
         "code": 0,
         "mid": str(d.get("manga_id") or mid),
