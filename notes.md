@@ -18,7 +18,9 @@ Astro 静态壳 + Cloudflare。章节和图源不在 HTML 里。
 - 图源：`https://hip-tx-1.s3imgs.top` + `/i/{token}/n.webp`
 - 解码前缀 `qM9` / 后缀 `Z7`，解开后按 order_id/sid 丢掉一张诱饵图
 
-本地搜索合并包子 + 嬉皮。嬉皮条目 slug 为 `hip-{mid}`。
+本地搜索合并包子 + 嬉皮 + Kmoe（kzo.moe）。
+- 嬉皮 slug `hip-{mid}`，可在线阅读
+- Kmoe slug `kmoe-{id}`，卷目录匿名可拿；mobi/epub 仍要原站登录，目录页跳 `https://kzo.moe/c/{id}.htm`
 
 本地站缓存：
 - `data/home/` 首页分区
@@ -28,5 +30,6 @@ Astro 静态壳 + Cloudflare。章节和图源不在 HTML 里。
 - `data/chapter/` 已解码图链
 
 `python3 server.py` → http://127.0.0.1:8788
+线上（新加坡 Starter）：https://ikun-manga-sg.onrender.com  
 上 Render：见 `deploy/RENDER.md`。VPS：`HOST=0.0.0.0 PORT=8788 python3 server.py`，步骤见 `deploy/README.md`。
 首页 / 人气 / 更新 / 上架 / 搜索 / 在线阅读。图片走流，点下载才打 zip。

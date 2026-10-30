@@ -35,6 +35,7 @@ from pathlib import Path
 
 from decoder import decode_images
 import hipmh
+import kmoe
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -238,7 +239,13 @@ def is_hip_request(slug: str = "", mid: str = "", cid: str = "", src: str = "") 
     if str(slug or "").startswith("hip-") or str(mid or "").startswith("hip-"):
         return True
     c = str(cid or "")
-    return bool(c) and not c.isdigit()
+    return bool(c) and not c.isdigit() and not str(slug or "").startswith("kmoe-")
+
+
+def is_kmoe_request(slug: str = "", src: str = "") -> bool:
+    if (src or "") == "kmoe":
+        return True
+    return str(slug or "").startswith("kmoe-")
 
 
 def search_merged(keyword: str, page: int = 1) -> dict:
@@ -249,6 +256,7 @@ def search_merged(keyword: str, page: int = 1) -> dict:
     errs: list[str] = []
     hip: dict = {"list": [], "total": 0}
     bz: dict = {"list": [], "total": 0}
+    km: dict = {"list": [], "total": 0}
 
     def _hip():
         return hipmh.search(keyword, page)
@@ -256,9 +264,13 @@ def search_merged(keyword: str, page: int = 1) -> dict:
     def _bz():
         return search_site(keyword, page)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    def _km():
+        return kmoe.search(keyword, page)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
         f_hip = pool.submit(_hip)
         f_bz = pool.submit(_bz)
+        f_km = pool.submit(_km)
         try:
             hip = f_hip.result()
         except Exception as e:
@@ -267,11 +279,15 @@ def search_merged(keyword: str, page: int = 1) -> dict:
             bz = f_bz.result()
         except Exception as e:
             errs.append("包子: " + str(e))
+        try:
+            km = f_km.result()
+        except Exception as e:
+            errs.append("Kmoe: " + str(e))
     for it in bz.get("list") or []:
         it.setdefault("source", "bz")
     merged = []
     seen = set()
-    for it in (hip.get("list") or []) + (bz.get("list") or []):
+    for it in (hip.get("list") or []) + (km.get("list") or []) + (bz.get("list") or []):
         slug = it.get("slug") or ""
         if slug in seen:
             continue
@@ -281,12 +297,16 @@ def search_merged(keyword: str, page: int = 1) -> dict:
         "code": 0,
         "keyword": keyword,
         "page": page,
-        "total": int(hip.get("total") or 0) + int(bz.get("total") or 0),
+        "total": int(hip.get("total") or 0) + int(bz.get("total") or 0) + int(km.get("total") or 0),
         "list": merged,
-        "sources": {"hip": int(hip.get("total") or 0), "bz": int(bz.get("total") or 0)},
+        "sources": {
+            "hip": int(hip.get("total") or 0),
+            "bz": int(bz.get("total") or 0),
+            "kmoe": int(km.get("total") or 0),
+        },
     }
     if merged:
-        for it in hip.get("list") or []:
+        for it in (hip.get("list") or []) + (km.get("list") or []):
             if it.get("slug"):
                 cache_set(
                     "slug",
@@ -296,7 +316,7 @@ def search_merged(keyword: str, page: int = 1) -> dict:
                         "slug": it["slug"],
                         "title": it.get("title") or "",
                         "cover": it.get("cover") or "",
-                        "source": "hip",
+                        "source": it.get("source") or "",
                     },
                 )
         cache_set("search", key, payload)
@@ -333,6 +353,28 @@ def hip_manga(slug: str) -> dict:
                 "title": full.get("title") or "",
                 "cover": full.get("cover") or "",
                 "source": "hip",
+            },
+        )
+    return full
+
+
+def kmoe_manga(slug: str) -> dict:
+    bid = kmoe.numeric_id(slug[5:] if slug.startswith("kmoe-") else slug)
+    cached = cache_get("manga", "kmoe_" + bid, TTL_MANGA, allow_stale=True)
+    if cached:
+        return dict(cached)
+    full = kmoe.manga(bid)
+    cache_set("manga", "kmoe_" + bid, full)
+    if full.get("slug"):
+        cache_set(
+            "slug",
+            full["slug"],
+            {
+                "mid": full["id"],
+                "slug": full["slug"],
+                "title": full.get("title") or "",
+                "cover": full.get("cover") or "",
+                "source": "kmoe",
             },
         )
     return full
@@ -710,6 +752,8 @@ class Handler(BaseHTTPRequestHandler):
             if not slug:
                 return self._json({"code": -1, "msg": "slug required"}, 400)
             try:
+                if is_kmoe_request(slug=slug, src=src):
+                    return self._json(kmoe_manga(slug))
                 if is_hip_request(slug=slug, src=src):
                     return self._json(hip_manga(slug))
                 meta = manga_mid(slug)

@@ -128,6 +128,7 @@
     .cover .src { position: absolute; top: 6px; right: 6px; font-size: 10px; font-style: normal; font-weight: 700; color: #fff; padding: 1px 6px; border-radius: 5px; background: rgba(0,0,0,.45); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
     .cover .src.hip { background: rgba(122,77,255,.85); }
     .cover .src.bz { background: rgba(255,138,0,.88); }
+    .cover .src.kmoe { background: rgba(40,140,220,.9); }
     .cover .no { position: absolute; top: 0; left: 0; min-width: 28px; height: 28px; padding: 0 6px; display: grid; place-items: center; font-style: italic; font-weight: 900; font-size: 15px; color: #fff; background: rgba(0,0,0,.55); border-bottom-right-radius: 12px; }
     .cover .no.n1 { background: linear-gradient(135deg,#ffd34d,#ff9900); }
     .cover .no.n2 { background: linear-gradient(135deg,#c9d3e0,#8794a8); }
@@ -353,7 +354,7 @@
     </div>
   </header>
   <main class="wrap" id="view"></main>
-  <footer class="foot">i kun漫画 · 内容来自包子漫画 / 嬉皮漫画</footer>
+  <footer class="foot">i kun漫画 · 包子 / 嬉皮 / Kmoe</footer>
   <nav class="tabbar" id="tabbar"></nav>
   <button class="to-top" id="toTop" title="回到顶部">↑</button>
   <div class="toast" id="toast"></div>
@@ -469,6 +470,10 @@
       const s = String((x && x.source) || x || "");
       return s === "hip" || s.startsWith("hip-") || (typeof x === "object" && x && String(x.slug || "").startsWith("hip-"));
     };
+    const isKmoe = (x) => {
+      const s = String((x && x.source) || x || "");
+      return s === "kmoe" || s.startsWith("kmoe-") || (typeof x === "object" && x && String(x.slug || "").startsWith("kmoe-"));
+    };
     const chapterUrl = (mid, cid, src) => "/api/chapter?m=" + enc(mid) + "&c=" + enc(cid) + (src === "hip" || String(cid || "").indexOf("-") >= 0 ? "&src=hip" : "");
     const mangaUrl = (slug) => "/api/manga?slug=" + enc(slug);
 
@@ -494,8 +499,8 @@
     function imgTag(src, cls) {
       return src ? '<img' + (cls ? ' class="' + cls + '"' : "") + ' src="' + esc(src) + '" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" draggable="false" onload="this.classList.add(\'ok\')" onerror="this.remove()">' : "";
     }
-    const srcName = (s) => isHip(s) ? "嬉皮漫画" : s && s.source === "bz" ? "包子漫画" : "";
-    const srcTag = (s) => s.source === "hip" ? '<i class="src hip">嬉皮</i>' : (s.source === "bz" ? '<i class="src bz">包子</i>' : "");
+    const srcName = (s) => isHip(s) ? "嬉皮漫画" : isKmoe(s) ? "Kmoe" : s && s.source === "bz" ? "包子漫画" : "";
+    const srcTag = (s) => s.source === "hip" ? '<i class="src hip">嬉皮</i>' : s.source === "kmoe" ? '<i class="src kmoe">Kmoe</i>' : (s.source === "bz" ? '<i class="src bz">包子</i>' : "");
     function cover(src, extra) {
       return '<div class="cover">' + imgTag(src) + (extra || "") + "</div>";
     }
@@ -673,7 +678,9 @@
       const latest = chs[0], first = chs[chs.length - 1];
       const h = readHistory()[j.slug || slug] || {};
       const readSet = new Set(h.read || []);
-      const readHref = (cid) => "#/read/" + enc(j.slug || slug) + "/" + enc(j.id) + "/" + enc(cid);
+      const kmoe = isKmoe(j) || isKmoe({ slug });
+      const ext = j.external || (kmoe ? "https://kzo.moe/c/" + j.id + ".htm" : "");
+      const readHref = (cid) => kmoe ? ext : "#/read/" + enc(j.slug || slug) + "/" + enc(j.id) + "/" + enc(cid);
       const desc = (j.desc || "").trim();
       const from = srcName(j) || srcName({ slug });
 
@@ -691,9 +698,10 @@
             (desc ? '<div class="desc" id="desc">' + esc(desc) + '</div><button class="more" id="descMore" hidden>展开简介 ▾</button>' : "") +
           "</div>" +
           '<div class="bar">' +
-            (h.cid ? '<a class="btn" href="' + readHref(h.cid) + '">续看 · ' + esc(h.ctitle || "") + "</a>" : "") +
-            (first ? '<a class="btn' + (h.cid ? " glass" : "") + '" href="' + readHref(first.id) + '">从第一话开始</a>' : "") +
-            (latest ? '<a class="btn glass" href="' + readHref(latest.id) + '">看最新</a>' : "") +
+            (kmoe ? '<a class="btn" href="' + esc(ext) + '" target="_blank" rel="noopener">去 kzo.moe 登录下载</a>' : "") +
+            (!kmoe && h.cid ? '<a class="btn" href="' + readHref(h.cid) + '">续看 · ' + esc(h.ctitle || "") + "</a>" : "") +
+            (!kmoe && first ? '<a class="btn' + (h.cid ? " glass" : "") + '" href="' + readHref(first.id) + '">从第一话开始</a>' : "") +
+            (!kmoe && latest ? '<a class="btn glass" href="' + readHref(latest.id) + '">看最新</a>' : "") +
           "</div>" +
         "</div>" +
         panel(
@@ -725,9 +733,11 @@
         if (asc) list = list.slice().reverse();
         box.innerHTML = list.map((c) =>
           '<div class="ch' + (c.id === h.cid ? " last" : readSet.has(c.id) ? " read" : "") + '" data-id="' + esc(c.id) + '">' +
-            '<a href="' + readHref(c.id) + '" title="' + esc(c.title) + '"><div class="name">' + esc(c.title) + "</div>" +
-            '<div class="meta">' + fmtDate(c.updated) + "</div></a>" +
-            '<button class="dl" data-dl="' + esc(c.id) + '" title="下载本话 zip" aria-label="下载">⤓</button></div>'
+            '<a href="' + (kmoe ? esc(ext) : readHref(c.id)) + '"' + (kmoe ? ' target="_blank" rel="noopener"' : "") + ' title="' + esc(c.title) + '"><div class="name">' + esc(c.title) + "</div>" +
+            '<div class="meta">' + fmtDate(c.updated) + (c.pages ? " · " + esc(c.pages) + " 页" : "") + "</div></a>" +
+            (kmoe
+              ? '<a class="dl" href="' + esc(ext) + '" target="_blank" rel="noopener" title="原站登录后下载">↗</a>'
+              : '<button class="dl" data-dl="' + esc(c.id) + '" title="下载本话 zip" aria-label="下载">⤓</button>') + "</div>"
         ).join("") || '<div class="state" style="grid-column:1/-1">没有匹配的章节</div>';
         $("#chCount").textContent = (f ? list.length + " / " : "") + chs.length + " 话";
       };
