@@ -255,7 +255,11 @@
       }
       return p;
     }
-    const chapterUrl = (mid, cid) => "/api/chapter?m=" + enc(mid) + "&c=" + enc(cid);
+    const isHip = (x) => {
+      const s = String((x && x.source) || x || "");
+      return s === "hip" || s.startsWith("hip-") || (typeof x === "object" && x && String(x.slug || "").startsWith("hip-"));
+    };
+    const chapterUrl = (mid, cid, src) => "/api/chapter?m=" + enc(mid) + "&c=" + enc(cid) + (src === "hip" || String(cid || "").indexOf("-") >= 0 ? "&src=hip" : "");
     const mangaUrl = (slug) => "/api/manga?slug=" + enc(slug);
 
     /* ---------- ui helpers ---------- */
@@ -283,11 +287,12 @@
     }
     function cards(list, badgeOf) {
       if (!list || !list.length) return '<div class="state">没有内容</div>';
-      return '<div class="grid">' + list.map((s) =>
-        '<a class="card" href="#/manga/' + enc(s.slug) + '" title="' + esc(s.title) + '">' +
-          cover(s.cover, badgeOf && badgeOf(s)) +
-          '<div class="t">' + esc(s.title) + "</div></a>"
-      ).join("") + "</div>";
+      return '<div class="grid">' + list.map((s) => {
+        const tag = badgeOf ? badgeOf(s) : (s.source === "hip" ? "嬉皮" : (s.source === "bz" ? "包子" : ""));
+        return '<a class="card" href="#/manga/' + enc(s.slug) + '" title="' + esc(s.title) + '">' +
+          cover(s.cover, tag) +
+          '<div class="t">' + esc(s.title) + "</div></a>";
+      }).join("") + "</div>";
     }
     function secHead(title, more) {
       return '<div class="sec-head"><h2>' + esc(title) + "</h2>" + (more ? '<a href="' + more + '">更多 ›</a>' : "") + "</div>";
@@ -458,7 +463,7 @@
       };
       box.onclick = (e) => {
         const b = e.target.closest("[data-dl]");
-        if (b) downloadChapter(j.id, b.dataset.dl, b);
+        if (b) downloadChapter(j.id, b.dataset.dl, b, j.source);
       };
     }
 
@@ -467,7 +472,7 @@
       setNav("");
       document.body.classList.add("reading");
       render('<div class="r-head"><div class="sk sk-line" style="width:40%;height:22px"></div></div><div class="reader"><div class="pg">解开图链…</div></div>');
-      const j = await api(chapterUrl(mid, cid));
+      const j = await api(chapterUrl(mid, cid, String(slug || "").startsWith("hip-") ? "hip" : ""));
       if (ctx.stale()) return;
       slug = j.slug || slug;
       const pages = j.pages || [];
@@ -477,7 +482,7 @@
 
       const width = isPhone() ? 99999 : store.get("bz.rw", 860);
       const imgs = pages.map((p, i) => {
-        const src = "/img?line=" + enc(j.line) + "&path=" + enc(p.path);
+        const src = "/img?line=" + enc(j.line) + "&path=" + enc(p.path) + (j.source === "hip" || (p.path || "").indexOf("/i/") === 0 ? "&src=hip" : "");
         return '<div class="pg" data-i="' + i + '"><span>' + (i + 1) + '</span>' +
           '<img ' + (i < 3 ? 'fetchpriority="high" ' : 'loading="lazy" ') + 'decoding="async" src="' + src + '" alt="第 ' + (i + 1) + ' 页"></div>';
       }).join("");
@@ -537,7 +542,7 @@
       $$("img", reader).forEach((img) => { if (img.complete && img.naturalWidth) img.parentNode.classList.add("ok"); });
 
       $("#rw").onchange = (e) => { const v = Number(e.target.value); store.set("bz.rw", v); reader.style.setProperty("--rw", v + "px"); };
-      $("#dl").onclick = (e) => downloadChapter(mid, cid, e.target);
+      $("#dl").onclick = (e) => downloadChapter(mid, cid, e.target, j.source);
 
       // 章节下拉：目录接口有缓存，后台拉
       api(mangaUrl(slug)).then((m) => {
@@ -553,7 +558,7 @@
       // 预取下一话图链 + 前几页图
       if (j.next) {
         api(chapterUrl(mid, j.next)).then((n) => {
-          (n.pages || []).slice(0, 3).forEach((p) => { const im = new Image(); im.src = "/img?line=" + enc(n.line) + "&path=" + enc(p.path); });
+          (n.pages || []).slice(0, 3).forEach((p) => { const im = new Image(); im.src = "/img?line=" + enc(n.line) + "&path=" + enc(p.path) + (n.source === "hip" ? "&src=hip" : ""); });
         }).catch(() => {});
       }
 
@@ -601,9 +606,9 @@
       };
     }
 
-    function downloadChapter(mid, cid, btn) {
+    function downloadChapter(mid, cid, btn, src) {
       const a = document.createElement("a");
-      a.href = "/download?m=" + enc(mid) + "&c=" + enc(cid);
+      a.href = "/download?m=" + enc(mid) + "&c=" + enc(cid) + (src === "hip" || String(cid || "").indexOf("-") >= 0 ? "&src=hip" : "");
       document.body.appendChild(a);
       a.click();
       a.remove();

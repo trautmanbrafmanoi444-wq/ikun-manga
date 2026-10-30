@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from decoder import decode_images
+import hipmh
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -204,6 +205,82 @@ def home_payload() -> dict:
     return payload
 
 
+def is_hip_request(slug: str = "", mid: str = "", cid: str = "", src: str = "") -> bool:
+    if (src or "") == "hip":
+        return True
+    if str(slug or "").startswith("hip-") or str(mid or "").startswith("hip-"):
+        return True
+    c = str(cid or "")
+    return bool(c) and not c.isdigit()
+
+
+def search_merged(keyword: str, page: int = 1) -> dict:
+    key = f"mix_{keyword}_{page}"
+    cached = cache_get("search", key, TTL_SEARCH)
+    if cached:
+        return cached
+    errs: list[str] = []
+    hip: dict = {"list": [], "total": 0}
+    bz: dict = {"list": [], "total": 0}
+    try:
+        hip = hipmh.search(keyword, page)
+    except Exception as e:
+        errs.append("嬉皮: " + str(e))
+    try:
+        bz = search_site(keyword, page)
+    except Exception as e:
+        errs.append("包子: " + str(e))
+    for it in bz.get("list") or []:
+        it.setdefault("source", "bz")
+    merged = (hip.get("list") or []) + (bz.get("list") or [])
+    payload = {
+        "code": 0,
+        "keyword": keyword,
+        "page": page,
+        "total": int(hip.get("total") or 0) + int(bz.get("total") or 0),
+        "list": merged,
+        "sources": {"hip": int(hip.get("total") or 0), "bz": int(bz.get("total") or 0)},
+    }
+    if merged:
+        cache_set("search", key, payload)
+        return payload
+    if errs:
+        raise RuntimeError("；".join(errs))
+    return payload
+
+
+def hip_manga(slug: str) -> dict:
+    mid = hipmh.numeric_mid(slug[4:] if slug.startswith("hip-") else slug)
+    cached = cache_get("manga", "hip_" + mid, TTL_MANGA)
+    if cached:
+        return cached
+    full = hipmh.manga(mid)
+    cache_set("manga", "hip_" + mid, full)
+    if full.get("slug"):
+        cache_set(
+            "slug",
+            full["slug"],
+            {
+                "mid": full["id"],
+                "slug": full["slug"],
+                "title": full.get("title") or "",
+                "cover": full.get("cover") or "",
+                "source": "hip",
+            },
+        )
+    return full
+
+
+def hip_chapter(mid: str, cid: str) -> dict:
+    key = "hip_%s_%s" % (mid, cid)
+    cached = cache_get("chapter", key, TTL_CHAPTER)
+    if cached:
+        return cached
+    payload = hipmh.chapter(mid, cid)
+    cache_set("chapter", key, payload)
+    return payload
+
+
 def search_site(keyword: str, page: int = 1) -> dict:
     key = f"{keyword}_{page}"
     cached = cache_get("search", key, TTL_SEARCH)
@@ -346,6 +423,7 @@ def chapter_info(mid: str, cid: str) -> dict:
         "nexttitle": info.get("nexttitle") or "",
         "pre": str(info.get("pre") or ""),
         "next": str(info.get("next") or ""),
+        "source": "bz",
         "pages": pages,
     }
     cache_set("chapter", key, payload)
@@ -400,28 +478,50 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._route(head_only=False)
 
-    def _img(self, path: str, line: int, head_only: bool):
+    def _img(self, path: str, line: int, head_only: bool, src: str = ""):
         if (
             ".." in path
             or not path.startswith("/")
-            or not re.match(r"^/[a-z0-9][a-z0-9_./-]*\.(webp|jpg|jpeg|png)$", path, re.I)
+            or not re.match(r"^/[A-Za-z0-9][A-Za-z0-9_./-]*\.(webp|jpg|jpeg|png)$", path, re.I)
         ):
             return self._send(400, b"bad path", "text/plain")
-        url = cdn_host(line) + path
+        hip = src == "hip" or path.startswith("/i/")
+        if hip:
+            urls = [h + path for h in hipmh.img_hosts(line)]
+            referer = "https://reader.hipmh.top/"
+        else:
+            urls = [cdn_host(line) + path]
+            referer = SITE + "/"
         rng = None if head_only else self.headers.get("Range")
         hdrs = {
             "User-Agent": UA,
             "Accept": "image/webp,image/*,*/*;q=0.8",
-            "Referer": SITE + "/",
+            "Referer": referer,
         }
         if rng:
             hdrs["Range"] = rng
-        req = urllib.request.Request(url, headers=hdrs)
-        try:
-            resp = urllib.request.urlopen(req, timeout=40, context=CTX)
-        except urllib.error.HTTPError as e:
-            body = e.read()
-            return self._send(e.code, body, e.headers.get("Content-Type") or "text/plain")
+        resp = None
+        last_err = None
+        for url in urls:
+            req = urllib.request.Request(url, headers=hdrs)
+            try:
+                resp = urllib.request.urlopen(req, timeout=40, context=CTX)
+                last_err = None
+                break
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code in (404, 403, 410):
+                    continue
+                body = e.read()
+                return self._send(e.code, body, e.headers.get("Content-Type") or "text/plain")
+            except Exception as e:
+                last_err = e
+                continue
+        if resp is None:
+            if isinstance(last_err, urllib.error.HTTPError):
+                body = last_err.read()
+                return self._send(last_err.code, body, last_err.headers.get("Content-Type") or "text/plain")
+            return self._send(502, str(last_err or "cdn fail").encode(), "text/plain")
         ctype = resp.headers.get("Content-Type") or "image/webp"
         cl = resp.headers.get("Content-Length")
         cr = resp.headers.get("Content-Range") or ""
@@ -453,8 +553,11 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             resp.close()
 
-    def _zip(self, mid: str, cid: str):
-        info = chapter_info(mid, cid)
+    def _zip(self, mid: str, cid: str, src: str = ""):
+        if is_hip_request(mid=mid, cid=cid, src=src):
+            info = hip_chapter(mid, cid)
+        else:
+            info = chapter_info(mid, cid)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
             for i, page in enumerate(info["pages"], 1):
@@ -523,21 +626,25 @@ class Handler(BaseHTTPRequestHandler):
             if not kw:
                 return self._json({"code": -1, "msg": "keyword required"}, 400)
             try:
-                return self._json(search_site(kw, page))
+                return self._json(search_merged(kw, page))
             except Exception as e:
                 return self._json({"code": -1, "msg": str(e)}, 502)
 
         if path == "/api/manga":
             slug = (qs.get("slug") or [""])[0].strip()
+            src = (qs.get("src") or [""])[0].strip()
             if not slug:
                 return self._json({"code": -1, "msg": "slug required"}, 400)
             try:
+                if is_hip_request(slug=slug, src=src):
+                    return self._json(hip_manga(slug))
                 meta = manga_mid(slug)
                 full = manga_full(meta["mid"])
                 if not full.get("cover"):
                     full["cover"] = meta.get("cover") or ""
                 if not full.get("title"):
                     full["title"] = meta.get("title") or slug
+                full.setdefault("source", "bz")
                 return self._json(full)
             except Exception as e:
                 return self._json({"code": -1, "msg": str(e)}, 502)
@@ -545,9 +652,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/chapter":
             mid = (qs.get("m") or qs.get("mid") or [""])[0].strip()
             cid = (qs.get("c") or qs.get("cid") or [""])[0].strip()
+            src = (qs.get("src") or [""])[0].strip()
             if not mid or not cid:
                 return self._json({"code": -1, "msg": "m and c required"}, 400)
             try:
+                if is_hip_request(mid=mid, cid=cid, src=src):
+                    return self._json(hip_chapter(mid, cid))
                 return self._json(chapter_info(mid, cid))
             except Exception as e:
                 return self._json({"code": -1, "msg": str(e)}, 502)
@@ -555,10 +665,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/img":
             img_path = (qs.get("path") or [""])[0]
             line = int((qs.get("line") or ["2"])[0] or 2)
+            src = (qs.get("src") or [""])[0]
             if not img_path:
                 return self._send(400, b"path required", "text/plain")
             try:
-                return self._img(img_path, line, head_only)
+                return self._img(img_path, line, head_only, src=src)
             except Exception as e:
                 return self._send(502, str(e).encode(), "text/plain")
 
@@ -571,10 +682,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             mid = (qs.get("m") or [""])[0].strip()
             cid = (qs.get("c") or [""])[0].strip()
+            src = (qs.get("src") or [""])[0].strip()
             if not mid or not cid:
                 return self._send(400, b"m and c required", "text/plain")
             try:
-                return self._zip(mid, cid)
+                return self._zip(mid, cid, src=src)
             except Exception as e:
                 return self._send(502, str(e).encode(), "text/plain")
 

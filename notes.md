@@ -11,6 +11,15 @@ Astro 静态壳 + Cloudflare。章节和图源不在 HTML 里。
 
 解码：`decoder.py` 对齐 `window.__cimg.r`。blob 解一次后写入 `data/chapter/`，二次打开不再打加密接口。
 
+嬉皮 m.hipmh.com：
+- 搜索：`GET https://hipapi1.s3file.top/v1/search?q=`
+- 目录：`GET /v1/manga/chapters?mid=`
+- 章节：`GET /v2/chapter?hid=`（前端 hid `m:id-c:cid` 要换成 API hid `c:cid`）
+- 图源：`https://hip-tx-1.s3imgs.top` + `/i/{token}/n.webp`
+- 解码前缀 `qM9` / 后缀 `Z7`，解开后按 order_id/sid 丢掉一张诱饵图
+
+本地搜索合并包子 + 嬉皮。嬉皮条目 slug 为 `hip-{mid}`。
+
 本地站缓存：
 - `data/home/` 首页分区
 - `data/search/` 搜索
