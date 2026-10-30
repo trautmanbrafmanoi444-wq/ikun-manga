@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .DS_Store
 static/index.orig.html
+
+kmoe.cookies
+.secrets/

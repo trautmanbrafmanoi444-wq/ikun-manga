@@ -380,6 +380,16 @@ def kmoe_manga(slug: str) -> dict:
     return full
 
 
+def kmoe_chapter(mid: str, cid: str) -> dict:
+    key = "kmoe_%s_%s" % (mid, cid)
+    cached = cache_get("chapter", key, TTL_CHAPTER)
+    if cached:
+        return cached
+    payload = kmoe.chapter(mid, cid)
+    cache_set("chapter", key, payload)
+    return payload
+
+
 def hip_chapter(mid: str, cid: str) -> dict:
     key = "hip_%s_%s" % (mid, cid)
     cached = cache_get("chapter", key, TTL_CHAPTER)
@@ -670,6 +680,18 @@ class Handler(BaseHTTPRequestHandler):
             resp.close()
 
     def _zip(self, mid: str, cid: str, src: str = ""):
+        if is_kmoe_request(src=src) or src == "kmoe":
+            info = kmoe_chapter(mid, cid)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+                for i, page in enumerate(info["pages"], 1):
+                    name = page["path"].rsplit("/", 1)[-1]
+                    raw = kmoe.page_file(mid, cid, name).read_bytes()
+                    zf.writestr("%03d.jpg" % i, raw)
+            data = buf.getvalue()
+            fname = safe_name(f"{info['manga']} - {info['title']}") + ".zip"
+            extra = {"Content-Disposition": content_disposition(fname)}
+            return self._send(200, data, "application/zip", extra)
         if is_hip_request(mid=mid, cid=cid, src=src):
             info = hip_chapter(mid, cid)
         else:
@@ -771,9 +793,12 @@ class Handler(BaseHTTPRequestHandler):
             mid = (qs.get("m") or qs.get("mid") or [""])[0].strip()
             cid = (qs.get("c") or qs.get("cid") or [""])[0].strip()
             src = (qs.get("src") or [""])[0].strip()
+            slug = (qs.get("slug") or [""])[0].strip()
             if not mid or not cid:
                 return self._json({"code": -1, "msg": "m and c required"}, 400)
             try:
+                if is_kmoe_request(slug=slug, src=src) or src == "kmoe" or str(mid).isdigit() and src == "kmoe":
+                    return self._json(kmoe_chapter(mid, cid))
                 if is_hip_request(mid=mid, cid=cid, src=src):
                     return self._json(hip_chapter(mid, cid))
                 return self._json(chapter_info(mid, cid))
@@ -790,6 +815,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._img(img_path, line, head_only, src=src)
             except Exception as e:
                 return self._send(502, str(e).encode(), "text/plain")
+
+        if path.startswith("/kmoe-img/"):
+            parts = [p for p in path.split("/") if p]
+            # kmoe-img / bid / vol / name
+            if len(parts) != 4:
+                return self._send(400, b"bad path", "text/plain")
+            _, bid, vol, name = parts
+            try:
+                fpath = kmoe.page_file(bid, vol, name)
+            except Exception as e:
+                return self._send(404, str(e).encode(), "text/plain")
+            data = fpath.read_bytes()
+            ctype = "image/jpeg"
+            if name.lower().endswith(".png"):
+                ctype = "image/png"
+            elif name.lower().endswith(".webp"):
+                ctype = "image/webp"
+            extra = {"Cache-Control": "public, max-age=86400"}
+            if head_only:
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+            return self._send(200, data, ctype, extra)
 
         if path == "/download":
             if head_only:

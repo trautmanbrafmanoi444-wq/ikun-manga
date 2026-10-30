@@ -33,3 +33,8 @@ Astro 静态壳 + Cloudflare。章节和图源不在 HTML 里。
 线上（新加坡 Starter）：https://ikun-manga-sg.onrender.com  
 上 Render：见 `deploy/RENDER.md`。VPS：`HOST=0.0.0.0 PORT=8788 python3 server.py`，步骤见 `deploy/README.md`。
 首页 / 人气 / 更新 / 上架 / 搜索 / 在线阅读。图片走流，点下载才打 zip。
+
+Kmoe 账号（本地 .secrets/kmoe.env，勿提交）：
+- 已注册登录：kmoe@jerfsa.org，uin 11961521，quota_now=300，is_vip=0
+- 卷目录登录后可用；getdownurl 会跳 /regphone.php（6 位短信），iCanDown=0
+- 无跳过接口。lindaleisd.org 被原站拒收（e403），jerfsa.org 可收验证码
