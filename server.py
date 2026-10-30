@@ -29,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -52,13 +53,15 @@ CDN = {
     2: "https://c-nd2-1.6wm.top",
     "default": "https://c-nd3-1.6wm.top",
 }
-TTL_HOME = 600
-TTL_SEARCH = 600
-TTL_MANGA = 300
+TTL_HOME = 1800
+TTL_SEARCH = 1800
+TTL_MANGA = 900
 TTL_CHAPTER = 86400 * 7
+STALE = 86400 * 3
 
 _LOCK = threading.Lock()
 _MEM: dict[str, tuple[float, object]] = {}
+_OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CTX))
 
 CARD_RE = re.compile(
     r'<a href="(/manga/([^"/\s]+))"[^>]*>'
@@ -79,7 +82,7 @@ def http_get(url: str, headers: dict | None = None, timeout: int = 25) -> bytes:
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
+    with _OPENER.open(req, timeout=timeout) as resp:
         return resp.read()
 
 
@@ -97,22 +100,24 @@ def _disk_path(kind: str, key: str) -> Path:
     return folder / (name + ".json")
 
 
-def cache_get(kind: str, key: str, ttl: int):
+def cache_get(kind: str, key: str, ttl: int, allow_stale: bool = False):
     now = time.time()
     ck = f"{kind}:{key}"
     with _LOCK:
         hit = _MEM.get(ck)
         if hit and now - hit[0] < ttl:
             return hit[1]
+        if allow_stale and hit and now - hit[0] < STALE:
+            return hit[1]
     path = _disk_path(kind, key)
     if path.is_file():
         try:
             obj = json.loads(path.read_text("utf-8"))
             ts = float(obj.get("_ts") or 0)
-            if now - ts < ttl:
-                data = obj.get("data")
-                with _LOCK:
-                    _MEM[ck] = (ts, data)
+            data = obj.get("data")
+            with _LOCK:
+                _MEM[ck] = (ts, data)
+            if now - ts < ttl or (allow_stale and now - ts < STALE):
                 return data
         except Exception:
             pass
@@ -184,29 +189,35 @@ def fetch_list_page(path: str) -> list[dict]:
 
 
 def home_payload() -> dict:
-    cached = cache_get("home", "index", TTL_HOME)
+    cached = cache_get("home", "index", TTL_HOME, allow_stale=True)
     if cached:
         return cached
-    html = http_get(SITE + "/", headers={"Accept": "text/html"}).decode("utf-8", "replace")
-    sections = parse_home_sections(html)
     extras = {}
-    need = []
-    if not sections.get("rank"):
-        need.append(("hots", "/hots", "rank"))
-    if not sections.get("hot_update"):
-        need.append(("dayup", "/dayup", "hot_update"))
-    if not sections.get("new"):
-        need.append(("newss", "/newss", "new"))
-    for list_key, path, sec_key in need:
+    hip_rank: list = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_html = pool.submit(lambda: http_get(SITE + "/", headers={"Accept": "text/html"}).decode("utf-8", "replace"))
+        f_hip = pool.submit(hipmh.popularity)
+        html = f_html.result()
+        sections = parse_home_sections(html)
+        need = []
+        if not sections.get("rank"):
+            need.append(("hots", "/hots", "rank"))
+        if not sections.get("hot_update"):
+            need.append(("dayup", "/dayup", "hot_update"))
+        if not sections.get("new"):
+            need.append(("newss", "/newss", "new"))
+        futs = {pool.submit(fetch_list_page, path): (list_key, sec_key) for list_key, path, sec_key in need}
+        for fut in as_completed(futs):
+            list_key, sec_key = futs[fut]
+            try:
+                extras[list_key] = fut.result()
+                sections[sec_key] = extras[list_key]
+            except Exception:
+                extras[list_key] = []
         try:
-            extras[list_key] = fetch_list_page(path)
-            sections[sec_key] = extras[list_key]
+            hip_rank = f_hip.result()
         except Exception:
-            extras[list_key] = []
-    try:
-        hip_rank = hipmh.popularity()
-    except Exception:
-        hip_rank = []
+            hip_rank = []
     extras["hip_rank"] = hip_rank
     if hip_rank:
         seen = {((x.get("title") or "").strip()) for x in hip_rank}
@@ -215,6 +226,10 @@ def home_payload() -> dict:
     payload = {"code": 0, "sections": sections, "lists": extras}
     cache_set("home", "index", payload)
     return payload
+
+
+def work_slug_safe(mid: str) -> str:
+    return "hip-" + str(mid)
 
 
 def is_hip_request(slug: str = "", mid: str = "", cid: str = "", src: str = "") -> bool:
@@ -228,20 +243,30 @@ def is_hip_request(slug: str = "", mid: str = "", cid: str = "", src: str = "") 
 
 def search_merged(keyword: str, page: int = 1) -> dict:
     key = f"mix_{keyword}_{page}"
-    cached = cache_get("search", key, TTL_SEARCH)
+    cached = cache_get("search", key, TTL_SEARCH, allow_stale=True)
     if cached:
         return cached
     errs: list[str] = []
     hip: dict = {"list": [], "total": 0}
     bz: dict = {"list": [], "total": 0}
-    try:
-        hip = hipmh.search(keyword, page)
-    except Exception as e:
-        errs.append("嬉皮: " + str(e))
-    try:
-        bz = search_site(keyword, page)
-    except Exception as e:
-        errs.append("包子: " + str(e))
+
+    def _hip():
+        return hipmh.search(keyword, page)
+
+    def _bz():
+        return search_site(keyword, page)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_hip = pool.submit(_hip)
+        f_bz = pool.submit(_bz)
+        try:
+            hip = f_hip.result()
+        except Exception as e:
+            errs.append("嬉皮: " + str(e))
+        try:
+            bz = f_bz.result()
+        except Exception as e:
+            errs.append("包子: " + str(e))
     for it in bz.get("list") or []:
         it.setdefault("source", "bz")
     merged = []
@@ -261,6 +286,19 @@ def search_merged(keyword: str, page: int = 1) -> dict:
         "sources": {"hip": int(hip.get("total") or 0), "bz": int(bz.get("total") or 0)},
     }
     if merged:
+        for it in hip.get("list") or []:
+            if it.get("slug"):
+                cache_set(
+                    "slug",
+                    it["slug"],
+                    {
+                        "mid": it.get("mid") or "",
+                        "slug": it["slug"],
+                        "title": it.get("title") or "",
+                        "cover": it.get("cover") or "",
+                        "source": "hip",
+                    },
+                )
         cache_set("search", key, payload)
         return payload
     if errs:
@@ -270,11 +308,15 @@ def search_merged(keyword: str, page: int = 1) -> dict:
 
 def hip_manga(slug: str) -> dict:
     mid = hipmh.numeric_mid(slug[4:] if slug.startswith("hip-") else slug)
-    cached = cache_get("manga", "hip_" + mid, TTL_MANGA)
+    cached = cache_get("manga", "hip_" + mid, TTL_MANGA, allow_stale=True)
     if cached:
         return cached
     full = hipmh.manga(mid)
-    cache_set("manga", "hip_" + mid, full)
+    meta = cache_get("slug", full.get("slug") or work_slug_safe(mid), TTL_CHAPTER, allow_stale=True) or {}
+    if not full.get("title") or str(full.get("title") or "").startswith("嬉皮 "):
+        full["title"] = meta.get("title") or full.get("title") or ""
+    if not full.get("cover"):
+        full["cover"] = meta.get("cover") or ""
     if full.get("slug"):
         cache_set(
             "slug",
@@ -302,7 +344,7 @@ def hip_chapter(mid: str, cid: str) -> dict:
 
 def search_site(keyword: str, page: int = 1) -> dict:
     key = f"{keyword}_{page}"
-    cached = cache_get("search", key, TTL_SEARCH)
+    cached = cache_get("search", key, TTL_SEARCH, allow_stale=True)
     if cached:
         return cached
     qs = urllib.parse.urlencode({"q": keyword, "page": page})
@@ -472,7 +514,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", extra.get("Cache-Control") if extra and extra.get("Cache-Control") else "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Connection", "close")
+        self.send_header("Connection", extra.get("Connection") if extra and extra.get("Connection") else "keep-alive")
         if extra:
             for k, v in extra.items():
                 if k == "Cache-Control":
@@ -548,7 +590,7 @@ class Handler(BaseHTTPRequestHandler):
             "Accept-Ranges": "bytes",
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": "public, max-age=86400",
-            "Connection": "close",
+            "Connection": "keep-alive",
         }
         code = 206 if rng and cr else 200
         self.send_response(code)

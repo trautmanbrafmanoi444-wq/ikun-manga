@@ -240,12 +240,28 @@
     const memo = new Map();
     async function api(url, { cache = true } = {}) {
       if (cache && memo.has(url)) return memo.get(url);
+      const sk = "ikun:" + url;
+      if (cache) {
+        try {
+          const raw = sessionStorage.getItem(sk);
+          if (raw) {
+            const obj = JSON.parse(raw);
+            if (Date.now() - obj.t < 15 * 60 * 1000 && obj.j && Number(obj.j.code) === 0) {
+              memo.set(url, Promise.resolve(obj.j));
+              return obj.j;
+            }
+          }
+        } catch {}
+      }
       const p = (async () => {
         let r;
         try { r = await fetch(url); } catch { throw new Error("网络连接失败，本地服务是否在运行？"); }
         let j;
         try { j = await r.json(); } catch { throw new Error("服务返回异常（HTTP " + r.status + "）"); }
         if (Number(j.code) !== 0) throw new Error(j.msg || "上游请求失败");
+        if (cache) {
+          try { sessionStorage.setItem(sk, JSON.stringify({ t: Date.now(), j })); } catch {}
+        }
         return j;
       })();
       if (cache) {

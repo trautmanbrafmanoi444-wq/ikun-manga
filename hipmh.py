@@ -7,6 +7,7 @@ import re
 import ssl
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from decoder import decode_hip_images
 
@@ -24,6 +25,7 @@ IMG_HOSTS = {
     9: "https://hip-tx-s1.s3imgs.top",
 }
 _META = {}
+_OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CTX))
 IMG_FALLBACK = [
     "https://hip-tx-1.s3imgs.top",
     "https://hip-cf-1.s3imgs.top",
@@ -42,7 +44,7 @@ def hip_get(url: str, timeout: int = 25) -> bytes:
             "Origin": "https://m.hipmh.com",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
+    with _OPENER.open(req, timeout=timeout) as resp:
         return resp.read()
 
 
@@ -100,7 +102,7 @@ def popularity(limit: int = 24) -> list[dict]:
             "Referer": "https://m.hipmh.com/",
         },
     )
-    with urllib.request.urlopen(req, timeout=20, context=CTX) as resp:
+    with _OPENER.open(req, timeout=20) as resp:
         html = resp.read().decode("utf-8", "replace")
     items = []
     seen = set()
@@ -170,47 +172,51 @@ def search(keyword: str, page: int = 1, page_size: int = 20) -> dict:
     }
 
 
+def _chapter_page(mid: str, page: int, per_page: int = 50) -> dict:
+    qs = urllib.parse.urlencode(
+        {"mid": mid, "page": page, "per_page": per_page, "order": "desc"}
+    )
+    j = hip_json(f"{API}/v1/manga/chapters?{qs}")
+    if j.get("code") != 200:
+        raise RuntimeError(j.get("message") or "hipmh chapters failed")
+    return j.get("data") or {}
+
+
+def _items_to_chapters(items: list) -> list[dict]:
+    out = []
+    for ch in items or []:
+        hid = ch.get("hid") or ""
+        out.append(
+            {
+                "id": hid,
+                "title": ch.get("title") or "",
+                "slug": hid,
+                "order": ch.get("chapter_number"),
+                "updated": (ch.get("updated_at") or "")[:10],
+            }
+        )
+    return out
+
+
 def manga(mid: str) -> dict:
     mid = numeric_mid(mid)
-    chapters = []
-    title = ""
-    page = 1
-    total_pages = 1
-    while page <= total_pages and page <= 40:
-        qs = urllib.parse.urlencode(
-            {"mid": mid, "page": page, "per_page": 50, "order": "desc"}
-        )
-        j = hip_json(f"{API}/v1/manga/chapters?{qs}")
-        if j.get("code") != 200:
-            raise RuntimeError(j.get("message") or "hipmh chapters failed")
-        data = j.get("data") or {}
-        total_pages = int(data.get("total_pages") or 1)
-        for ch in data.get("items") or []:
-            hid = ch.get("hid") or ""
-            chapters.append(
-                {
-                    "id": hid,
-                    "title": ch.get("title") or "",
-                    "slug": hid,
-                    "order": ch.get("chapter_number"),
-                    "updated": (ch.get("updated_at") or "")[:10],
-                }
-            )
-        page += 1
-    cover = ""
-    if chapters:
-        # 封面走搜索不到时用章节图
-        first_cover = ""
+    first = _chapter_page(mid, 1)
+    total_pages = min(int(first.get("total_pages") or 1), 40)
+    chapters = _items_to_chapters(first.get("items") or [])
+    if total_pages > 1:
+        pages: dict[int, list] = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {pool.submit(_chapter_page, mid, p): p for p in range(2, total_pages + 1)}
+            for fut in as_completed(futs):
+                pages[futs[fut]] = fut.result().get("items") or []
+        for p in range(2, total_pages + 1):
+            chapters.extend(_items_to_chapters(pages.get(p) or []))
     meta = _META.get(mid) or {}
-    title = title or meta.get("title") or ""
-    cover = cover or meta.get("cover") or ""
+    title = meta.get("title") or ""
+    cover = meta.get("cover") or ""
     desc = meta.get("desc") or ""
-    if not title and chapters:
-        try:
-            info = chapter(mid, chapters[0]["id"])
-            title = info.get("manga") or title
-        except Exception:
-            title = title or ("嬉皮 " + mid)
+    if not title:
+        title = "嬉皮 " + mid
     payload = {
         "code": 0,
         "id": mid,
