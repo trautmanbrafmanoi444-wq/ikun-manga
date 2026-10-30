@@ -306,17 +306,23 @@ def search_merged(keyword: str, page: int = 1) -> dict:
     return payload
 
 
-def hip_manga(slug: str) -> dict:
-    mid = hipmh.numeric_mid(slug[4:] if slug.startswith("hip-") else slug)
-    cached = cache_get("manga", "hip_" + mid, TTL_MANGA, allow_stale=True)
-    if cached:
-        return cached
-    full = hipmh.manga(mid)
-    meta = cache_get("slug", full.get("slug") or work_slug_safe(mid), TTL_CHAPTER, allow_stale=True) or {}
+def _fill_hip_meta(full: dict) -> dict:
+    slug = full.get("slug") or work_slug_safe(full.get("id") or "")
+    meta = cache_get("slug", slug, TTL_CHAPTER, allow_stale=True) or {}
     if not full.get("title") or str(full.get("title") or "").startswith("嬉皮 "):
         full["title"] = meta.get("title") or full.get("title") or ""
     if not full.get("cover"):
         full["cover"] = meta.get("cover") or ""
+    return full
+
+
+def hip_manga(slug: str) -> dict:
+    mid = hipmh.numeric_mid(slug[4:] if slug.startswith("hip-") else slug)
+    cached = cache_get("manga", "hip_" + mid, TTL_MANGA, allow_stale=True)
+    if cached:
+        return _fill_hip_meta(dict(cached))
+    full = _fill_hip_meta(hipmh.manga(mid))
+    cache_set("manga", "hip_" + mid, full)
     if full.get("slug"):
         cache_set(
             "slug",
