@@ -9,6 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="i kun漫画" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="format-detection" content="telephone=no" />
+  <meta name="referrer" content="no-referrer" />
   <title>i kun漫画</title>
   <style>
     :root {
@@ -298,7 +299,7 @@
     }
     function cover(src, badge) {
       return '<div class="cover">' +
-        (src ? '<img src="' + esc(src) + '" loading="lazy" decoding="async" alt="" onload="this.classList.add(\'ok\')" onerror="this.remove()">' : "") +
+        (src ? '<img src="' + esc(src) + '" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add(\'ok\')" onerror="this.remove()">' : "") +
         (badge ? '<div class="badge">' + esc(badge) + "</div>" : "") + "</div>";
     }
     function cards(list, badgeOf) {
@@ -498,9 +499,14 @@
 
       const width = isPhone() ? 99999 : store.get("bz.rw", 860);
       const imgs = pages.map((p, i) => {
-        const src = "/img?line=" + enc(j.line) + "&path=" + enc(p.path) + (j.source === "hip" || (p.path || "").indexOf("/i/") === 0 ? "&src=hip" : "");
+        const proxy = "/img?line=" + enc(j.line) + "&path=" + enc(p.path) + (j.source === "hip" || (p.path || "").indexOf("/i/") === 0 ? "&src=hip" : "");
+        const direct = p.url || "";
+        const src = direct || proxy;
         return '<div class="pg" data-i="' + i + '"><span>' + (i + 1) + '</span>' +
-          '<img ' + (i < 3 ? 'fetchpriority="high" ' : 'loading="lazy" ') + 'decoding="async" src="' + src + '" alt="第 ' + (i + 1) + ' 页"></div>';
+          '<img ' + (i < 2 ? 'fetchpriority="high" ' : 'loading="lazy" ') +
+          'decoding="async" referrerpolicy="no-referrer" src="' + esc(src) +
+          '" data-proxy="' + esc(proxy) + '" data-direct="' + esc(direct) +
+          '" alt="第 ' + (i + 1) + ' 页"></div>';
       }).join("");
 
       render(
@@ -540,9 +546,17 @@
         if (img.tagName !== "IMG") return;
         const pg = img.parentNode;
         const tries = Number(img.dataset.tries || 0);
+        const proxy = img.dataset.proxy || "";
+        const onProxy = proxy && img.src.indexOf("/img?") >= 0;
+        if (!onProxy && proxy) {
+          img.dataset.tries = tries + 1;
+          img.src = proxy;
+          return;
+        }
         if (tries < 2) {
           img.dataset.tries = tries + 1;
-          setTimeout(() => { img.src = img.src.replace(/&r=\d+$/, "") + "&r=" + Date.now(); }, 800 * (tries + 1));
+          const base = (onProxy ? proxy : (img.dataset.direct || img.src)).replace(/[?&]r=\d+$/, "");
+          setTimeout(() => { img.src = base + (base.indexOf("?") >= 0 ? "&" : "?") + "r=" + Date.now(); }, 400 * (tries + 1));
           return;
         }
         pg.classList.add("fail");
@@ -550,7 +564,12 @@
         if (!pg.querySelector("button")) {
           const b = document.createElement("button");
           b.className = "btn ghost sm"; b.textContent = "重新加载";
-          b.onclick = () => { pg.classList.remove("fail"); img.dataset.tries = 0; img.src = img.src.replace(/&r=\d+$/, "") + "&r=" + Date.now(); b.remove(); };
+          b.onclick = () => {
+            pg.classList.remove("fail");
+            img.dataset.tries = 0;
+            img.src = img.dataset.direct || proxy;
+            b.remove();
+          };
           pg.appendChild(b);
         }
       }, true);
@@ -574,7 +593,7 @@
       // 预取下一话图链 + 前几页图
       if (j.next) {
         api(chapterUrl(mid, j.next)).then((n) => {
-          (n.pages || []).slice(0, 3).forEach((p) => { const im = new Image(); im.src = "/img?line=" + enc(n.line) + "&path=" + enc(p.path) + (n.source === "hip" ? "&src=hip" : ""); });
+          (n.pages || []).slice(0, 2).forEach((p) => { const im = new Image(); im.referrerPolicy = "no-referrer"; im.src = p.url || ("/img?line=" + enc(n.line) + "&path=" + enc(p.path) + (n.source === "hip" ? "&src=hip" : "")); });
         }).catch(() => {});
       }
 

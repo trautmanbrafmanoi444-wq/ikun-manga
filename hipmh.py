@@ -19,7 +19,7 @@ UA = (
 API = "https://hipapi1.s3file.top"
 COVER = "https://cover.s3imgs.top"
 IMG_HOSTS = {
-    1: "https://hip-tx-1.s3imgs.top",
+    1: "https://hip-cf-1.s3imgs.top",
     2: "https://hip-cf-1.s3imgs.top",
     3: "https://hip-tx-1.s3imgs.top",
     9: "https://hip-tx-s1.s3imgs.top",
@@ -27,10 +27,10 @@ IMG_HOSTS = {
 _META = {}
 _OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CTX))
 IMG_FALLBACK = [
-    "https://hip-tx-1.s3imgs.top",
     "https://hip-cf-1.s3imgs.top",
-    "https://hip-tx-s1.s3imgs.top",
+    "https://hip-tx-1.s3imgs.top",
     "https://hip-cf-s1.s3imgs.top",
+    "https://hip-tx-s1.s3imgs.top",
 ]
 
 
