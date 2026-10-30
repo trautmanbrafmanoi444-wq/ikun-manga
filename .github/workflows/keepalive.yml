@@ -16,9 +16,9 @@ jobs:
       - name: ping
         run: |
           set -e
-          URL="${KEEPALIVE_URL:-https://ikun-manga.onrender.com/health}"
+          URL="${KEEPALIVE_URL:-https://ikun-manga-sg.onrender.com/health}"
           curl -fsS --max-time 60 "$URL"
           echo
           echo "ok $(date -u +%FT%TZ)"
         env:
-          KEEPALIVE_URL: https://ikun-manga.onrender.com/health
+          KEEPALIVE_URL: https://ikun-manga-sg.onrender.com/health
