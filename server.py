@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import html as html_lib
 import io
 import json
@@ -88,10 +89,12 @@ def json_get(url: str) -> dict:
 
 
 def _disk_path(kind: str, key: str) -> Path:
-    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", key)[:160]
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    ascii_part = re.sub(r"[^a-zA-Z0-9._-]+", "_", key).strip("_")[:40]
+    name = (ascii_part + "_" if ascii_part else "") + digest
     folder = DATA / kind
     folder.mkdir(exist_ok=True)
-    return folder / (safe + ".json")
+    return folder / (name + ".json")
 
 
 def cache_get(kind: str, key: str, ttl: int):
@@ -200,6 +203,15 @@ def home_payload() -> dict:
             sections[sec_key] = extras[list_key]
         except Exception:
             extras[list_key] = []
+    try:
+        hip_rank = hipmh.popularity()
+    except Exception:
+        hip_rank = []
+    extras["hip_rank"] = hip_rank
+    if hip_rank:
+        seen = {((x.get("title") or "").strip()) for x in hip_rank}
+        rest = [x for x in (sections.get("rank") or []) if (x.get("title") or "").strip() not in seen]
+        sections["rank"] = hip_rank + rest
     payload = {"code": 0, "sections": sections, "lists": extras}
     cache_set("home", "index", payload)
     return payload
@@ -232,7 +244,14 @@ def search_merged(keyword: str, page: int = 1) -> dict:
         errs.append("包子: " + str(e))
     for it in bz.get("list") or []:
         it.setdefault("source", "bz")
-    merged = (hip.get("list") or []) + (bz.get("list") or [])
+    merged = []
+    seen = set()
+    for it in (hip.get("list") or []) + (bz.get("list") or []):
+        slug = it.get("slug") or ""
+        if slug in seen:
+            continue
+        seen.add(slug)
+        merged.append(it)
     payload = {
         "code": 0,
         "keyword": keyword,

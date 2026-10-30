@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import ssl
 import urllib.parse
 import urllib.request
@@ -88,6 +89,44 @@ def hid_to_api(hid: str) -> str:
         api_head = base64.b64encode(("c:" + cpart).encode()).decode().rstrip("=")
         return api_head + (("-" + rest) if rest else "")
     return hid
+
+
+def popularity(limit: int = 24) -> list[dict]:
+    req = urllib.request.Request(
+        "https://m.hipmh.com/popularity",
+        headers={
+            "User-Agent": UA,
+            "Accept": "text/html",
+            "Referer": "https://m.hipmh.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20, context=CTX) as resp:
+        html = resp.read().decode("utf-8", "replace")
+    items = []
+    seen = set()
+    for m in re.finditer(
+        r'href="/works/([^"]+)"[^>]*aria-label="([^"]+)"[\s\S]{0,900}?src="(https://[^"]+)"',
+        html,
+    ):
+        work_id, title, cover = m.group(1), m.group(2), m.group(3)
+        mid = numeric_mid(work_id)
+        if mid in seen:
+            continue
+        seen.add(mid)
+        item = {
+            "slug": work_slug(mid),
+            "title": title,
+            "cover": cover,
+            "href": "/works/" + work_id,
+            "source": "hip",
+            "mid": mid,
+            "work_id": work_id,
+        }
+        _META[mid] = {"title": title, "cover": cover, "desc": ""}
+        items.append(item)
+        if len(items) >= limit:
+            break
+    return items
 
 
 def cover_url(path: str) -> str:
