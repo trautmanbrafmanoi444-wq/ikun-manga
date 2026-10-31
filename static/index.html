@@ -18,6 +18,7 @@
   <link rel="dns-prefetch" href="https://hip-cf-1.s3imgs.top" />
   <link rel="dns-prefetch" href="https://cover.s3imgs.top" />
   <link rel="dns-prefetch" href="https://c-nd2-1.6wm.top" />
+  <script>window.__HOME__=null;</script>
   <title>i kun漫画</title>
   <style>
     :root {
@@ -435,6 +436,12 @@
     const memo = new Map();
     async function api(url, { cache = true } = {}) {
       if (cache && memo.has(url)) return memo.get(url);
+      if (cache && url === "/api/home" && window.__HOME__ && Number(window.__HOME__.code) === 0) {
+        const j = window.__HOME__;
+        memo.set(url, Promise.resolve(j));
+        try { sessionStorage.setItem("ikun:" + url, JSON.stringify({ t: Date.now(), j })); } catch {}
+        return j;
+      }
       const sk = "ikun:" + url;
       if (cache) {
         try {
@@ -450,7 +457,7 @@
       }
       const p = (async () => {
         let r;
-        try { r = await fetch(url); } catch { throw new Error("网络连接失败，本地服务是否在运行？"); }
+        try { r = await fetch(url, { credentials: "omit" }); } catch { throw new Error("网络连接失败，本地服务是否在运行？"); }
         let j;
         try { j = await r.json(); } catch { throw new Error("服务返回异常（HTTP " + r.status + "）"); }
         if (Number(j.code) !== 0) throw new Error(j.msg || "上游请求失败");
@@ -597,8 +604,9 @@
       const shelf = recent.length
         ? panel(secHead("继续阅读", "#/history", "书架") + cards(recent, { cls: "row", badge: (r) => r.ctitle, href: resumeHref }))
         : "";
-      render('<div class="hero sk"></div>' + quick() + shelf + panel(secHead("人气排行") + skeletonGrid(12)));
-      const j = await api("/api/home");
+      const boot = window.__HOME__ && Number(window.__HOME__.code) === 0 ? window.__HOME__ : null;
+      if (!boot) render('<div class="hero sk"></div>' + quick() + shelf + panel(secHead("人气排行") + skeletonGrid(12)));
+      const j = boot || await api("/api/home");
       if (ctx.stale()) return;
       const s = j.sections || {};
       const rank = s.rank || [];
@@ -779,16 +787,17 @@
 
       const width = isPhone() ? 99999 : store.get("bz.rw", 860);
       const imgs = pages.map((p, i) => {
-        const proxy = "/img?line=" + enc(j.line) + "&path=" + enc(p.path) + (j.source === "hip" || (p.path || "").indexOf("/i/") === 0 ? "&src=hip" : "");
+        const kmoePage = j.source === "kmoe" || (p.url || p.cf || "").indexOf("/kmoe-img/") === 0;
+        const proxy = kmoePage ? "" : ("/img?line=" + enc(j.line) + "&path=" + enc(p.path) + (j.source === "hip" || (p.path || "").indexOf("/i/") === 0 ? "&src=hip" : ""));
         const direct = pageSrc(p) || p.url || "";
-        const eager = i < 4;
+        const eager = i < 3;
         return '<div class="pg" data-i="' + i + '"><span>' + (i + 1) + '</span>' +
           '<img ' + (eager ? 'fetchpriority="high" src="' + esc(direct || proxy) + '" ' : 'data-src="' + esc(direct || proxy) + '" ') +
           'decoding="async" referrerpolicy="no-referrer" draggable="false"' +
           ' data-proxy="' + esc(proxy) + '" data-direct="' + esc(direct) +
           '" alt="第 ' + (i + 1) + ' 页"></div>';
       }).join("");
-      pages.slice(0, 4).forEach((p) => preloadImage(pageSrc(p) || p.url));
+      pages.slice(0, 3).forEach((p) => preloadImage(pageSrc(p) || p.url));
       const navBtn = (c, text, cls) => '<a class="btn sm' + (cls ? " " + cls : "") + '" ' +
         (c ? 'href="' + href(c) + '"' : 'aria-disabled="true" style="opacity:.4;pointer-events:none"') + ">" + text + "</a>";
 
@@ -880,7 +889,7 @@
           if (img.dataset.src && !img.getAttribute("src")) img.src = img.dataset.src;
           io.unobserve(img);
         });
-      }, { rootMargin: "2800px 0px 2800px 0px" });
+      }, { rootMargin: "1400px 0px 1800px 0px" });
       $$("img", reader).forEach((img) => {
         if (img.complete && img.naturalWidth) settle(img);
         if (img.dataset.src) io.observe(img);
@@ -956,7 +965,9 @@
 
     function downloadChapter(mid, cid, btn, src) {
       const a = document.createElement("a");
-      a.href = "/download?m=" + enc(mid) + "&c=" + enc(cid) + (src === "hip" || String(cid || "").indexOf("-") >= 0 ? "&src=hip" : "");
+      a.href = "/download?m=" + enc(mid) + "&c=" + enc(cid) +
+        (src === "kmoe" || String(mid || "").indexOf("kmoe") >= 0 ? "&src=kmoe" :
+         src === "hip" || String(cid || "").indexOf("-") >= 0 ? "&src=hip" : "");
       document.body.appendChild(a);
       a.click();
       a.remove();

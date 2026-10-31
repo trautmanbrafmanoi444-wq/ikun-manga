@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import html as html_lib
 import io
@@ -63,6 +64,9 @@ STALE = 86400 * 3
 _LOCK = threading.Lock()
 _MEM: dict[str, tuple[float, object]] = {}
 _OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CTX))
+_INDEX_HTML: bytes | None = None
+_INDEX_MTIME = 0.0
+HOME_MARK = b"window.__HOME__=null;"
 
 CARD_RE = re.compile(
     r'<a href="(/manga/([^"/\s]+))"[^>]*>'
@@ -573,27 +577,79 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
+    def _gzip_body(self, body: bytes, ctype: str) -> tuple[bytes, dict]:
+        if len(body) < 512:
+            return body, {}
+        kind = (ctype or "").split(";", 1)[0].strip().lower()
+        if kind not in (
+            "text/html",
+            "text/plain",
+            "text/css",
+            "text/javascript",
+            "application/javascript",
+            "application/json",
+            "application/xml",
+        ):
+            return body, {}
+        ae = (self.headers.get("Accept-Encoding") or "").lower()
+        if "gzip" not in ae:
+            return body, {}
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=5, mtime=0) as gz:
+            gz.write(body)
+        zipped = buf.getvalue()
+        if len(zipped) >= len(body) - 80:
+            return body, {}
+        return zipped, {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+
     def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
+        extra = dict(extra or {})
+        body, gz = self._gzip_body(body, ctype)
+        extra.update(gz)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", extra.get("Cache-Control") if extra and extra.get("Cache-Control") else "no-store")
+        self.send_header("Cache-Control", extra.get("Cache-Control") or "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Connection", extra.get("Connection") if extra and extra.get("Connection") else "keep-alive")
-        if extra:
-            for k, v in extra.items():
-                if k == "Cache-Control":
-                    continue
-                self.send_header(k, v)
+        self.send_header("Connection", extra.get("Connection") or "keep-alive")
+        for k, v in extra.items():
+            if k in ("Cache-Control", "Connection"):
+                continue
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, obj, code=200):
-        raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         extra = {"Cache-Control": "no-store"}
-        if obj.get("code") == 0 and any(k in obj for k in ("pages", "chapters", "sections", "list")):
-            extra["Cache-Control"] = "private, max-age=30"
+        if obj.get("code") == 0:
+            if "pages" in obj:
+                extra["Cache-Control"] = "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
+            elif "chapters" in obj:
+                extra["Cache-Control"] = "public, max-age=120, s-maxage=600, stale-while-revalidate=3600"
+            elif any(k in obj for k in ("sections", "list")):
+                extra["Cache-Control"] = "public, max-age=60, s-maxage=300, stale-while-revalidate=1800"
+            extra["CDN-Cache-Control"] = extra["Cache-Control"]
         self._send(code, raw, "application/json; charset=utf-8", extra)
+
+    def _index_bytes(self) -> bytes:
+        global _INDEX_HTML, _INDEX_MTIME
+        path = STATIC / "index.html"
+        mtime = path.stat().st_mtime
+        if _INDEX_HTML is None or mtime != _INDEX_MTIME:
+            _INDEX_HTML = path.read_bytes()
+            _INDEX_MTIME = mtime
+        html = _INDEX_HTML
+        if HOME_MARK not in html:
+            return html
+        try:
+            payload = home_payload()
+            blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            blob = blob.replace("<", "\\u003c").encode("utf-8")
+            injected = b"window.__HOME__=" + blob + b";"
+        except Exception:
+            injected = HOME_MARK
+        return html.replace(HOME_MARK, injected, 1)
 
     def do_OPTIONS(self):
         self._send(204, b"", "text/plain")
@@ -654,7 +710,7 @@ class Handler(BaseHTTPRequestHandler):
         extra = {
             "Accept-Ranges": "bytes",
             "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "public, max-age=86400",
+            "Cache-Control": "public, max-age=86400, s-maxage=604800",
             "Connection": "keep-alive",
         }
         code = 206 if rng and cr else 200
@@ -716,26 +772,22 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
 
         if path == "/health":
-            body = b"ok"
-            if head_only:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                return
-            return self._send(200, body, "text/plain")
+            return self._send(200, b"ok", "text/plain", {"Cache-Control": "no-store"})
 
         if path in ("/", "/index.html"):
-            html = (STATIC / "index.html").read_bytes()
+            html = self._index_bytes()
+            extra = {
+                "Cache-Control": "public, max-age=30, s-maxage=60, stale-while-revalidate=300",
+            }
             if head_only:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(html)))
+                self.send_header("Cache-Control", extra["Cache-Control"])
                 self.send_header("Connection", "close")
                 self.end_headers()
                 return
-            return self._send(200, html, "text/html; charset=utf-8")
+            return self._send(200, html, "text/html; charset=utf-8", extra)
 
         if path == "/api/home":
             try:
@@ -832,11 +884,14 @@ class Handler(BaseHTTPRequestHandler):
                 ctype = "image/png"
             elif name.lower().endswith(".webp"):
                 ctype = "image/webp"
-            extra = {"Cache-Control": "public, max-age=86400"}
+            extra = {
+                "Cache-Control": "public, max-age=86400, s-maxage=604800, immutable",
+            }
             if head_only:
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", extra["Cache-Control"])
                 self.send_header("Connection", "close")
                 self.end_headers()
                 return
@@ -868,7 +923,15 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, b"not found", "text/plain")
 
 
+def _warm() -> None:
+    try:
+        home_payload()
+    except Exception as e:
+        sys.stderr.write("warm home failed: %s\n" % e)
+
+
 def main() -> int:
+    threading.Thread(target=_warm, name="warm-home", daemon=True).start()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"ikun manga  http://{HOST}:{PORT}", flush=True)
     print("cache:", DATA, flush=True)

@@ -39,7 +39,8 @@ git push -u origin main
    - 环境变量 `HOST=0.0.0.0`（`PORT` 不用填，平台会注入）
 5. **Create Web Service**
 
-部署成功后地址类似 `https://ikun-manga.onrender.com`
+新加坡实例：`https://ikun-manga-sg.onrender.com`（现网 1 CPU / 2 GB，约 $25/月）  
+旧免费实例：`https://ikun-manga.onrender.com`（会休眠）
 
 仓库里有 `render.yaml` 的话，也可以 **New + → Blueprint**，选仓库自动建服务。
 

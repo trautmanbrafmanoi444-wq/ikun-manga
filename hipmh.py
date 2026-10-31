@@ -172,7 +172,7 @@ def search(keyword: str, page: int = 1, page_size: int = 20) -> dict:
     }
 
 
-def _chapter_page(mid: str, page: int, per_page: int = 50) -> dict:
+def _chapter_page(mid: str, page: int, per_page: int = 100) -> dict:
     qs = urllib.parse.urlencode(
         {"mid": mid, "page": page, "per_page": per_page, "order": "desc"}
     )
@@ -186,15 +186,14 @@ def _items_to_chapters(items: list) -> list[dict]:
     out = []
     for ch in items or []:
         hid = ch.get("hid") or ""
-        out.append(
-            {
-                "id": hid,
-                "title": ch.get("title") or "",
-                "slug": hid,
-                "order": ch.get("chapter_number"),
-                "updated": (ch.get("updated_at") or "")[:10],
-            }
-        )
+        row = {
+            "id": hid,
+            "title": ch.get("title") or "",
+        }
+        updated = (ch.get("updated_at") or "")[:10]
+        if updated:
+            row["updated"] = updated
+        out.append(row)
     return out
 
 

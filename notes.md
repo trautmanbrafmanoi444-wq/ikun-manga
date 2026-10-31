@@ -30,7 +30,7 @@ Astro 静态壳 + Cloudflare。章节和图源不在 HTML 里。
 - `data/chapter/` 已解码图链
 
 `python3 server.py` → http://127.0.0.1:8788
-线上（新加坡 Starter）：https://ikun-manga-sg.onrender.com  
+线上（新加坡 1 CPU / 2 GB）：https://ikun-manga-sg.onrender.com  
 上 Render：见 `deploy/RENDER.md`。VPS：`HOST=0.0.0.0 PORT=8788 python3 server.py`，步骤见 `deploy/README.md`。
 首页 / 人气 / 更新 / 上架 / 搜索 / 在线阅读。图片走流，点下载才打 zip。
 
